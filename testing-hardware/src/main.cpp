@@ -1,114 +1,110 @@
-#include <Arduino.h>
-#include <RFM69_ATC.h>//https://www.github.com/lowpowerlab/rfm69
+#include <RFM69.h>
+#include <SPI.h>
+#include <SPIFlash.h>
 #include <elapsedMillis.h>
-#include "Sleepy.h" 
 
-/****************************************************************************/
-/***********************    DON'T FORGET TO SET ME    ***********************/
-/****************************************************************************/
-#define NODEID    9 //Node Address
-#define NETWORKID 100 //Network to communicate on
-/****************************************************************************/
-
-#define GATEWAYID 0 //Address of datalogger/reciever
-#define FREQUENCY RF69_433MHZ
-#define ATC_RSSI -70 //ideal Signal Strength of trasmission
-#define ACK_WAIT_TIME 100 // # of ms to wait for an ack
-#define ACK_RETRIES 10 // # of attempts before giving up
-//#define LED 3 //LED pin for UAF Boards
-#define LED 8 //LED pin for DIY Boards
-#define SERIAL_BAUD 9600 //Serial communication rate
-
-/*==============|| Easy way of commenting out Serial Prints, etc for deployment ||==============*/
-#define SERIAL_EN //Comment this out to remove Serial comms and save a few kb's of space
-#ifdef SERIAL_EN
-#define DEBUG(input)   {Serial.print(input); delay(1);}
-#define DEBUGln(input) {Serial.println(input); delay(1);}
-#define DEBUGFlush() { Serial.flush(); }
-#else
-#define DEBUG(input);
-#define DEBUGln(input);
-#define DEBUGFlush();
-#endif
-
-/*==============|| Functions ||==============*/
 void Blink(byte, int);
-ISR(WDT_vect){ Sleepy::watchdogEvent();} // set watchdog for Sleepy
+int getRSSI(byte);
 
-/*==============|| RFM69 ||==============*/
-RFM69_ATC radio; //Declare Radio
-byte lastRequesterNodeID = NODEID; //Last Sensor to communicate with this device
-int8_t NodeID_latch; //Listen only to this Sensor #
+#define NODEID      2
+#define NETWORKID   100
+#define FREQUENCY   RF69_433MHZ //Match this with the version of your Moteino! (others: RF69_433MHZ, RF69_868MHZ)
+// #define KEY         "sampleEncryptKey" //has to be same 16 characters/bytes on all nodes, not more not less!
+#define LED         9  //motieno
+// #define LED         3 //diy
+#define SERIAL_BAUD 115200
+#define ACK_TIME    30  // # of ms to wait for an ack
+#define IS_RFM69HW_HCW  //uncomment only for RFM69HW/HCW! Leave out if you have RFM69W/CW!
 
-/*==============|| UTIL ||==============*/
-uint16_t count = 0; //measurement number
+RFM69 radio;
+unsigned int interval = 10000;
+elapsedMillis timeElapsed; //declare global if you don't want it reset every time loop runs
+int rssiThreshold = -100;
 
-//Data Structure for transmitting data packets to datalogger
-struct Payload {
-	uint16_t count;
-	double bat_v;
-};
-Payload thePayload;
+
+typedef struct {
+  unsigned long uptime; //uptime in ms
+} Payload;
+Payload theData;
 
 void setup() {
-    #ifdef SERIAL_EN
-		Serial.begin(SERIAL_BAUD); //only start Serial if DEBUG is on
-	#endif
-	randomSeed(analogRead(0)); //set random seed
-	pinMode(LED, OUTPUT);      // Set LED Mode
-	//Setup Radio
-	radio.initialize(FREQUENCY,NODEID,NETWORKID);
-	radio.setHighPower();
-	radio.encrypt(null);
-	// radio.enableAutoPower(ATC_RSSI);
-	DEBUG("-- Network Address: "); DEBUG(NETWORKID); DEBUG("."); DEBUGln(NODEID);
+  randomSeed(analogRead(0));
+  Serial.begin(SERIAL_BAUD);
+  delay(10);
+  radio.initialize(FREQUENCY,NODEID,NETWORKID);
+  radio.setHighPower(); //must include this only for RFM69HW/HCW!
+  radio.promiscuous(false);
+  char buff[50];
+  sprintf(buff, "\nListening at %d Mhz...", FREQUENCY==RF69_433MHZ ? 433 : FREQUENCY==RF69_868MHZ ? 868 : 915);
+  Serial.println(buff);
+  delay(random(500,2000));
 }
 
-elapsedMillis trigger_time;
+byte ackCount=0;
+byte lastRequesterNodeID = NODEID;
 
 void loop() {
-	// bool ping = false;
-	// if (radio.receiveDone()) { //if recieve packets from sensor...
-	// 	DEBUG("rcv < "); DEBUG('['); DEBUG(radio.SENDERID); DEBUG("] ");
-	// 	// lastRequesterNodeID = radio.SENDERID; //SENDERID is the Node ID of the device that sent the packet of data
-		// if(radio.DATALEN == 1 && radio.DATA[0] == 'p') {
-		// 	DEBUGln("p");
-		// 	ping = true;
-		// }
-		// if(radio.DATALEN == 1 && radio.DATA[0] == 'r') {
-		// 	DEBUGln("r");
-		// }
-		// Blink(LED,5); //blink the LED really fast
-	// 	if (radio.ACKRequested()) radio.sendACK(); //send acknoledgement of reciept
-	// }
-	// //sends a response back to confirm that the datalogger is alive
-	// if(ping) {
-	// 	DEBUG("snd > "); DEBUG('['); DEBUG(lastRequesterNodeID); DEBUG("] ");
-	// 	if(radio.sendWithRetry(lastRequesterNodeID, "r", 1)) {
-	// 		DEBUGln("r");
-	// 	} else {
-	// 		DEBUGln("Failed . . . no ack");
-	// 	}
-	// }
+  //listening and responding to other nodes
+  bool ping = false;
+  bool response = false;
+  if (radio.receiveDone())
+  {
+    lastRequesterNodeID = radio.SENDERID;
+    Serial.print("from ["); Serial.print(radio.SENDERID, DEC); Serial.print("] ");
+    Serial.print("sig: "); Serial.print(radio.readRSSI());
+    Serial.print(" ->"); Serial.print(radio.TARGETID, DEC);
+    Serial.println();
 
-	if(trigger_time > 10000) {
-		if(radio.sendWithRetry(1, "p", 1)) {
-			DEBUG("snd > "); DEBUG('['); DEBUG("255"); DEBUGln("]");
+    if(radio.DATALEN == 1 && radio.DATA[0] == 'p' && radio.TARGETID == 255) {
+      // if(radio.readRSSI() > rssiThreshold) {
+        ping = true;
+        Serial.println("<- ping");
+      // }
+    }
+
+    if(radio.DATALEN == 1 && radio.DATA[0] == 'r' && radio.TARGETID == NODEID) {
+      // if(radio.readRSSI() > rssiThreshold) {
+        response = true;
+        Serial.print("<-"); Serial.println(radio.SENDERID);
+      // } else Serial.println(radio.readRSSI());
+    }
+    
+    if (radio.ACKRequested()) {
+      radio.sendACK();
+      // Serial.println(" - ACK sent");
+      delay(10);
+    }
+    Blink(LED,3);
+  }
+
+	if(ping) {
+    delay(random(4,25));
+		// Serial.print("to ["); Serial.print(lastRequesterNodeID); Serial.print("] ");
+		if(radio.sendWithRetry(lastRequesterNodeID, "r", 1)) {
+			Serial.print("->"); Serial.println(lastRequesterNodeID);
 		} else {
-			DEBUGln("Failed . . . no ack");
+			// Serial.println("...nothing");
 		}
-		trigger_time = 0;
+    // Serial.println("**********");
 	}
+
+  if (timeElapsed > interval) {
+    Serial.println("---> ping");
+		radio.send(255, "p", 1);
+    Blink(LED,3);
+    timeElapsed = 0;              // reset the counter to 0 so the counting starts over...
+
+  }
 }
 
-/**
- * Blinks an LED
- * @param PIN      Pin to Blink
- * @param DELAY_MS Time to Delay
- */
-void Blink(byte PIN, int DELAY_MS) {
-	digitalWrite(PIN,HIGH);
-	delay(DELAY_MS);
-	digitalWrite(PIN,LOW);
-	delay(DELAY_MS);
+int getRSSI(byte ID) {
+  return 7;
+}
+
+void Blink(byte PIN, int DELAY_MS)
+{
+  pinMode(PIN, OUTPUT);
+  digitalWrite(PIN,HIGH);
+  delay(DELAY_MS);
+  digitalWrite(PIN,LOW);
 }
