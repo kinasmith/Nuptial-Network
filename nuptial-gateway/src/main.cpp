@@ -90,13 +90,13 @@ void loop() {
     // Serial.print("***** [");
     Serial.print(fromNode.rcvNodeID);
     Serial.print(",");
+    Serial.print(4.2); //fake battery voltage of the Polling Node
+    Serial.print(",");
     // Serial.println("] *****");
     for(uint8_t i=0; i<NODE_ARRAY_LENGTH; i++){
       if(fromNode.node[i].id > 0) {
         Serial.print(fromNode.node[i].id);
-        Serial.print(",");
-        Serial.print(fromNode.node[i].bv);
-        Serial.print(",");        
+        Serial.print(",");    
         Serial.print(fromNode.node[i].rssi);
         Serial.print(",");        
 
